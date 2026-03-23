@@ -1,114 +1,150 @@
 import express from "express";
-import path from "path";
 import axios from "axios";
 import Parser from "rss-parser";
 
 const app = express();
-const parser = new Parser();
+const parser = new Parser({
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+  },
+  timeout: 8000
+});
 
-// Cache object (In serverless, this is temporary but works for the request)
-let newsCache: any = {
-  gold: [],
-  travel: [],
-  tech: [],
-  economy: [],
-  lastUpdated: null
-};
+// --- CẤU TRÚC DỮ LIỆU CHUẨN ---
+interface NewsItem {
+  title: string;
+  link: string;
+  pubDate: string;
+  content: string;
+  thumbnail: string;
+  source: string;
+}
 
-async function fetchGoldPrices() {
-  // Nguồn 1: API Bảo Tín Minh Châu (Rất ổn định)
-  try {
-    const response = await axios.get("https://api.btmc.vn/api/v1/get-gold-price?key=3088da80-38b7-11eb-adc1-0242ac120002", {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (response.data && response.data.data) {
-      return response.data.data.map((item: any) => ({
-        title: `Vàng ${item.name}`,
+// --- BỘ XỬ LÝ RSS THÔNG MINH ---
+async function fetchRSS(urls: string[], category: string, fallbackSeed: string): Promise<NewsItem[]> {
+  const allItems: NewsItem[] = [];
+  
+  for (const url of urls) {
+    try {
+      const feed = await parser.parseURL(url);
+      const processed = feed.items.map(item => {
+        // Trích xuất ảnh từ description hoặc content:encoded
+        const rawContent = (item.content || item.description || "");
+        const imgMatch = rawContent.match(/src="([^"]+)"/);
+        let thumbnail = imgMatch ? imgMatch[1] : "";
+        
+        // Nếu không có ảnh, dùng ảnh placeholder theo chủ đề
+        if (!thumbnail || thumbnail.includes("feedburner")) {
+          thumbnail = `https://picsum.photos/seed/${fallbackSeed}-${Math.random()}/600/400`;
+        }
+
+        return {
+          title: item.title?.trim() || "Bản tin không tiêu đề",
+          link: item.link || "#",
+          pubDate: item.pubDate || new Date().toISOString(),
+          content: (item.contentSnippet || item.description || "")
+            .replace(/<[^>]*>?/gm, '') // Xóa HTML tags
+            .replace(/&nbsp;/g, ' ')
+            .trim()
+            .substring(0, 160) + "...",
+          thumbnail: thumbnail,
+          source: feed.title || "Tin tức Việt Nam"
+        };
+      });
+      allItems.push(...processed);
+    } catch (error) {
+      console.error(`Lỗi khi lấy RSS từ ${url}:`, error);
+    }
+  }
+  
+  // Sắp xếp theo thời gian mới nhất và lấy top 15
+  return allItems
+    .sort((a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime())
+    .slice(0, 15);
+}
+
+// --- BỘ XỬ LÝ GIÁ VÀNG ĐA NGUỒN ---
+async function fetchGoldPrices(): Promise<NewsItem[]> {
+  const sources = [
+    {
+      name: "Bảo Tín Minh Châu",
+      url: "https://api.btmc.vn/api/v1/get-gold-price?key=3088da80-38b7-11eb-adc1-0242ac120002",
+      process: (data: any) => data.data?.map((g: any) => ({
+        title: `Vàng ${g.name}`,
         link: "https://btmc.vn",
         pubDate: new Date().toISOString(),
-        content: `Giá vàng ${item.name} - Mua vào: ${item.buy} - Bán ra: ${item.sell} (Đơn vị: VNĐ/lượng)`,
-        thumbnail: "https://picsum.photos/seed/gold-btmc/400/300"
-      }));
-    }
-  } catch (e) {
-    console.warn("BTMC API failed, trying fallback...");
-  }
-
-  // Nguồn 2: Tygia.com (Dự phòng)
-  try {
-    const response = await axios.get("https://tygia.com/json.php?ran=0&gold=1&bank=1&date=now", {
-      timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (response.data && response.data.golds) {
-      const goldData = response.data.golds[0]?.value || [];
-      return goldData.slice(0, 10).map((g: any) => ({
+        content: `MUA: ${g.buy} - BÁN: ${g.sell} (VNĐ/lượng). Cập nhật từ Bảo Tín Minh Châu.`,
+        thumbnail: "https://picsum.photos/seed/gold-btmc/600/400",
+        source: "BTMC"
+      }))
+    },
+    {
+      name: "Tỷ Giá VN",
+      url: "https://tygia.com/json.php?ran=0&gold=1&bank=1&date=now",
+      process: (data: any) => data.golds?.[0]?.value?.map((g: any) => ({
         title: `Vàng ${g.type}`,
         link: "https://tygia.com",
         pubDate: new Date().toISOString(),
-        content: `Giá vàng ${g.type} - Mua vào: ${g.buy} triệu/lượng, Bán ra: ${g.sell} triệu/lượng.`,
-        thumbnail: "https://picsum.photos/seed/gold-price/400/300"
-      }));
+        content: `MUA: ${g.buy} - BÁN: ${g.sell} (Triệu/lượng). Dữ liệu thị trường tự do.`,
+        thumbnail: "https://picsum.photos/seed/gold-market/600/400",
+        source: "Tygia.com"
+      }))
     }
-  } catch (e) {
-    console.warn("Tygia Source failed");
-  }
+  ];
 
+  for (const source of sources) {
+    try {
+      const res = await axios.get(source.url, { timeout: 5000 });
+      const processed = source.process(res.data);
+      if (processed && processed.length > 0) return processed;
+    } catch (e) {
+      console.warn(`Nguồn vàng ${source.name} thất bại, thử nguồn tiếp theo...`);
+    }
+  }
+  
   return [];
 }
 
-async function getNewsData() {
+// --- API ENDPOINT CHÍNH ---
+app.get("/api/news", async (req, res) => {
+  // Ép vô hiệu hóa cache ở mọi cấp độ
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+
   try {
-    const [travelFeed, techFeed, economyFeed, worldFeed] = await Promise.all([
-      parser.parseURL("https://vnexpress.net/rss/du-lich.rss"),
-      parser.parseURL("https://vnexpress.net/rss/so-hoa.rss"),
-      parser.parseURL("https://vnexpress.net/rss/kinh-doanh.rss"),
-      parser.parseURL("https://vnexpress.net/rss/the-gioi.rss")
+    // Lấy dữ liệu song song nhưng xử lý lỗi độc lập
+    const [gold, economy, tech, travel] = await Promise.all([
+      fetchGoldPrices(),
+      fetchRSS([
+        "https://vnexpress.net/rss/kinh-doanh.rss",
+        "https://tuoitre.vn/rss/kinh-doanh.rss"
+      ], "economy", "business"),
+      fetchRSS([
+        "https://vnexpress.net/rss/so-hoa.rss",
+        "https://thanhnien.vn/rss/cong-nghe-game.rss"
+      ], "tech", "technology"),
+      fetchRSS([
+        "https://vnexpress.net/rss/du-lich.rss",
+        "https://tuoitre.vn/rss/du-lich.rss"
+      ], "travel", "travel")
     ]);
 
-    const goldPrices = await fetchGoldPrices();
-
-    const processItems = (items: any[], seed: string) => items.slice(0, 12).map(item => {
-      const imgMatch = item.content?.match(/src="([^"]+)"/);
-      const thumbnail = imgMatch ? imgMatch[1] : `https://picsum.photos/seed/${seed}-${Math.random()}/400/300`;
-      return {
-        title: item.title,
-        link: item.link,
-        pubDate: item.pubDate,
-        content: item.contentSnippet?.split('\n')[0] || "Xem chi tiết bản tin...",
-        thumbnail: thumbnail
-      };
+    res.json({
+      gold,
+      economy,
+      tech,
+      travel,
+      lastUpdated: new Date().toISOString()
     });
-
-    return {
-      gold: goldPrices,
-      travel: processItems(travelFeed.items, "travel"),
-      tech: processItems(techFeed.items, "tech"),
-      economy: processItems([...economyFeed.items, ...worldFeed.items].sort((a, b) => new Date(b.pubDate!).getTime() - new Date(a.pubDate!).getTime()), "economy"),
-      lastUpdated: new Date()
-    };
   } catch (error) {
-    console.error("Error fetching news:", error);
-    return newsCache;
-  }
-}
-
-app.get("/api/news", async (req, res) => {
-  try {
-    const data = await getNewsData();
-    res.setHeader('Content-Type', 'application/json');
-    // Giảm cache-control để tránh lỗi 304 khi dữ liệu thực sự cần cập nhật
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.json(data);
-  } catch (error) {
-    console.error("API Route Error:", error);
+    console.error("Lỗi hệ thống API:", error);
     res.status(500).json({ 
-      error: "Internal Server Error", 
-      gold: [], travel: [], tech: [], economy: [], 
-      lastUpdated: new Date().toISOString() 
+      error: "Không thể tải dữ liệu",
+      gold: [], economy: [], tech: [], travel: [],
+      lastUpdated: new Date().toISOString()
     });
   }
 });
