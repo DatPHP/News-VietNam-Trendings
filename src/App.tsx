@@ -88,10 +88,28 @@ function NewsSection() {
   const { data, isLoading, isError, refetch, isFetching } = useQuery<NewsData>({
     queryKey: ['news'],
     queryFn: async () => {
-      const res = await fetch('/api/news');
-      return res.json();
+      console.log("Fetching news...");
+      const res = await fetch(`/api/news?t=${Date.now()}`, {
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        }
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      const json = await res.json();
+      console.log("News data received:", json);
+      
+      // Kiểm tra dữ liệu hợp lệ
+      if (!json || typeof json !== 'object') {
+        throw new Error("Invalid data format received from server");
+      }
+      
+      return json;
     },
-    refetchInterval: 10 * 60 * 1000, // 10 minutes
+    refetchInterval: 10 * 60 * 1000,
+    retry: 2,
   });
 
   const tabs = [

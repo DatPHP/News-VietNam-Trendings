@@ -95,10 +95,22 @@ async function getNewsData() {
 }
 
 app.get("/api/news", async (req, res) => {
-  const data = await getNewsData();
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
-  res.json(data);
+  try {
+    const data = await getNewsData();
+    res.setHeader('Content-Type', 'application/json');
+    // Giảm cache-control để tránh lỗi 304 khi dữ liệu thực sự cần cập nhật
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.json(data);
+  } catch (error) {
+    console.error("API Route Error:", error);
+    res.status(500).json({ 
+      error: "Internal Server Error", 
+      gold: [], travel: [], tech: [], economy: [], 
+      lastUpdated: new Date().toISOString() 
+    });
+  }
 });
 
 export default app;
