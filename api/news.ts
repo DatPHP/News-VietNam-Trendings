@@ -1,14 +1,12 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import axios from "axios";
 import Parser from "rss-parser";
 
 const app = express();
-const PORT = 3000;
 const parser = new Parser();
 
-// Cache object
+// Cache object (In serverless, this is temporary but works for the request)
 let newsCache: any = {
   gold: [],
   travel: [],
@@ -17,10 +15,8 @@ let newsCache: any = {
   lastUpdated: null
 };
 
-const REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
-
 async function fetchGoldPrices() {
-  // Source 1: SJC XML (Official)
+  // Source 1: SJC XML
   try {
     const response = await axios.get("https://sjc.com.vn/xml/tygiavang.xml", {
       timeout: 5000,
@@ -46,10 +42,10 @@ async function fetchGoldPrices() {
     }
     if (results.length > 0) return results;
   } catch (e) {
-    console.warn("SJC Source failed, trying fallback...");
+    console.warn("SJC Source failed");
   }
 
-  // Source 2: Tygia.com API (Reliable Fallback)
+  // Source 2: Tygia.com
   try {
     const response = await axios.get("https://tygia.com/json.php?ran=0&gold=1&bank=1&date=now", {
       timeout: 5000,
@@ -65,29 +61,12 @@ async function fetchGoldPrices() {
         thumbnail: "https://picsum.photos/seed/gold-price/400/300"
       }));
     }
-  } catch (e) {
-    console.error("All gold price sources failed:", e);
-  }
+  } catch (e) {}
 
-  // Final Fallback: Financial News
-  try {
-    const financeFeed = await parser.parseURL("https://vnexpress.net/rss/kinh-doanh.rss");
-    return financeFeed.items
-      .filter(item => item.title?.toLowerCase().includes("vàng"))
-      .slice(0, 10)
-      .map(item => ({
-        title: item.title || "Tin tức giá vàng",
-        link: item.link || "#",
-        pubDate: item.pubDate || new Date().toISOString(),
-        content: item.contentSnippet || "Cập nhật tin tức thị trường vàng.",
-        thumbnail: item.content?.match(/src="([^"]+)"/)?.[1] || "https://picsum.photos/seed/finance/400/300"
-      }));
-  } catch (e) {
-    return [];
-  }
+  return [];
 }
 
-async function fetchNews() {
+async function getNewsData() {
   try {
     const [travelFeed, techFeed, economyFeed, worldFeed] = await Promise.all([
       parser.parseURL("https://vnexpress.net/rss/du-lich.rss"),
@@ -98,7 +77,7 @@ async function fetchNews() {
 
     const goldPrices = await fetchGoldPrices();
 
-    newsCache = {
+    return {
       gold: goldPrices,
       travel: travelFeed.items.slice(0, 10).map(item => ({
         title: item.title,
@@ -126,46 +105,17 @@ async function fetchNews() {
         })),
       lastUpdated: new Date()
     };
-    console.log("News cache updated at:", newsCache.lastUpdated);
   } catch (error) {
     console.error("Error fetching news:", error);
+    return newsCache;
   }
 }
 
-// Initial fetch
-fetchNews();
-// Set interval
-setInterval(fetchNews, REFRESH_INTERVAL);
-
-app.get("/api/news", (req, res) => {
+app.get("/api/news", async (req, res) => {
+  const data = await getNewsData();
   res.setHeader('Content-Type', 'application/json');
-  res.json(newsCache);
+  res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate');
+  res.json(data);
 });
-
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", lastUpdated: newsCache.lastUpdated });
-});
-
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-}
-
-startServer();
 
 export default app;
